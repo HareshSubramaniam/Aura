@@ -1,18 +1,17 @@
 import logging
+import asyncio
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from uuid import uuid4
 import copy
-import asyncio
+import socketio
 
 from ml_vitals import load_model, predict_vitals_anomaly
 from routing_agent import find_best_hospital, HOSPITALS, score_hospital, haversine
-import socketio
 from socket_server import sio, emit_location, emit_confirmed
 
-# Fix encoding issue for logging on Windows
 import sys
 if sys.platform == 'win32':
     import codecs
@@ -51,7 +50,7 @@ AMBULANCES_DB = [
     "assigned_emergency": None
   },
   {
-    "id": "AMB-002", 
+    "id": "AMB-002",
     "driver_name": "Ravi Shankar",
     "phone": "+919876543211",
     "vehicle_number": "TN33 CD 5678",
@@ -138,12 +137,12 @@ def root():
 @app.post("/emergency/trigger")
 async def trigger_emergency(req: EmergencyRequest):
     logger.info("Triggering emergency")
-    
+
     routing_result = find_best_hospital(HOSPITALS_DB, req.patient_lat, req.patient_lng)
     best_hosp = routing_result['best_hospital']
-    
+
     emergency_id = "EMG-" + str(uuid4())[:8].upper()
-    
+
     EMERGENCIES_DB[emergency_id] = {
         "emergency_id": emergency_id,
         "status": "dispatched",
@@ -153,21 +152,21 @@ async def trigger_emergency(req: EmergencyRequest):
         "ml_assessment": None,
         "confirmed": False
     }
-    
+
     hospital_id_str = ""
     if best_hosp:
         for idx, h in enumerate(HOSPITALS_DB):
             if h['name'] == best_hosp['name']:
                 hospital_id_str = str(idx)
                 break
-                
+
     score_breakdown = {
         "score": float(best_hosp['score']) if best_hosp else 0.0,
         "dist_km": float(best_hosp['dist_km']) if best_hosp else 0.0,
         "icu_score": float(best_hosp['icu_score']) if best_hosp else 0.0,
         "readiness_score": float(best_hosp['readiness_score']) if best_hosp else 0.0
     }
-    
+
     nearest_amb = None
     nearest_dist = float('inf')
     for amb in AMBULANCES_DB:
@@ -177,7 +176,7 @@ async def trigger_emergency(req: EmergencyRequest):
             if d < nearest_dist:
                 nearest_dist = d
                 nearest_amb = amb
-                
+
     if nearest_amb:
         nearest_amb['status'] = 'en_route_to_patient'
         nearest_amb['assigned_emergency'] = emergency_id
@@ -190,9 +189,9 @@ async def trigger_emergency(req: EmergencyRequest):
         }
     else:
         assigned_ambulance = None
-    
-    # Broadcast emergency to ALL connected clients (driver + hospital tabs)
-    asyncio.get_event_loop().create_task(sio.emit("emergency_assigned", {
+
+    # Broadcast to ALL connected socket clients
+    await sio.emit("emergency_assigned", {
         "emergency_id": emergency_id,
         "patientName": req.patient_name,
         "lat": req.patient_lat,
@@ -207,17 +206,20 @@ async def trigger_emergency(req: EmergencyRequest):
             "has_oxygen": best_hosp.get("oxygen", False)
         },
         "familyPhone": req.family_phone
-    }))
-    return {"emergency_id": emergency_id, "status": "dispatched",
+    })
+
+    return {
+        "emergency_id": emergency_id,
+        "status": "dispatched",
         "hospital_name": best_hosp['name'] if best_hosp else "None",
         "hospital_address": best_hosp.get('address', 'Unknown') if best_hosp else "Unknown",
         "hospital_id": hospital_id_str,
         "eta_minutes": 8,
         "score_breakdown": score_breakdown,
-        "routing_formula": "Score=(0.5×Proximity)+(0.3×ICU)+(0.2×Readiness)",
+        "routing_formula": "Score=(0.5xProximity)+(0.3xICU)+(0.2xReadiness)",
         "all_hospitals_ranked": routing_result.get('all_ranked', []),
         "skipped_hospitals": routing_result.get('skipped_hospitals', []),
-        "tracking_url": f"http://localhost:5173/track/{emergency_id}",
+        "tracking_url": f"https://aura-iota-orpin.vercel.app/track/{emergency_id}",
         "assigned_ambulance": assigned_ambulance
     }
 
@@ -225,7 +227,6 @@ async def trigger_emergency(req: EmergencyRequest):
 @app.get("/hospitals")
 def get_hospitals(lat: Optional[float] = None, lng: Optional[float] = None):
     hospitals_list = []
-    
     if lat is not None and lng is not None:
         ranked = []
         for i, h in enumerate(HOSPITALS_DB):
@@ -241,7 +242,6 @@ def get_hospitals(lat: Optional[float] = None, lng: Optional[float] = None):
                 "status": "Active"
             })
             ranked.append(h_copy)
-            
         ranked.sort(key=lambda x: x['score'], reverse=True)
         for rank, h in enumerate(ranked):
             h['rank'] = rank + 1
@@ -258,90 +258,57 @@ def get_hospitals(lat: Optional[float] = None, lng: Optional[float] = None):
                 "status": "Active"
             })
             hospitals_list.append(h_copy)
-            
-    return {
-        "hospitals": hospitals_list,
-        "total": len(HOSPITALS_DB)
-    }
+    return {"hospitals": hospitals_list, "total": len(HOSPITALS_DB)}
 
 @app.patch("/hospitals/{hospital_id}")
 def update_hospital(hospital_id: int, update: HospitalUpdate):
     if hospital_id < 0 or hospital_id >= len(HOSPITALS_DB):
         raise HTTPException(status_code=404, detail="Hospital not found")
-        
     h = HOSPITALS_DB[hospital_id]
-    if update.icu_beds is not None:
-        h['icu'] = update.icu_beds
-    if update.has_oxygen is not None:
-        h['oxygen'] = update.has_oxygen
-    if update.has_er_doctor is not None:
-        h['doctor'] = update.has_er_doctor
-    if update.doctor_count is not None:
-        h['doctor_count'] = update.doctor_count
-    if update.doctor_available is not None:
-        h['doctor_available'] = update.doctor_available
-    if update.specialty is not None:
-        h['specialty'] = update.specialty
-        
+    if update.icu_beds is not None: h['icu'] = update.icu_beds
+    if update.has_oxygen is not None: h['oxygen'] = update.has_oxygen
+    if update.has_er_doctor is not None: h['doctor'] = update.has_er_doctor
+    if update.doctor_count is not None: h['doctor_count'] = update.doctor_count
+    if update.doctor_available is not None: h['doctor_available'] = update.doctor_available
+    if update.specialty is not None: h['specialty'] = update.specialty
     res = find_best_hospital(HOSPITALS_DB, 11.0168, 76.9558)
-    
-    return {
-        "success": True,
-        "updated_hospital": h,
-        "new_rankings": res['all_ranked'],
-        "skipped_count": len(res['skipped_hospitals']),
-        "message": f"Rankings updated. {len(res['skipped_hospitals'])} hospitals skipped."
-    }
+    return {"success": True, "updated_hospital": h, "new_rankings": res['all_ranked'],
+            "skipped_count": len(res['skipped_hospitals']),
+            "message": f"Rankings updated. {len(res['skipped_hospitals'])} hospitals skipped."}
 
 @app.post("/vitals")
 def submit_vitals(vitals: VitalsSubmission):
     if vitals.emergency_id not in EMERGENCIES_DB:
         raise HTTPException(status_code=404, detail="Emergency not found")
-        
     assessment = predict_vitals_anomaly(vitals.heart_rate, vitals.systolic_bp, vitals.diastolic_bp, ml_model, ml_scaler)
-    
     em = EMERGENCIES_DB[vitals.emergency_id]
     em['vitals'] = vitals.model_dump() if hasattr(vitals, 'model_dump') else vitals.dict()
     em['ml_assessment'] = assessment
-    
     if assessment['risk_level'] == "CRITICAL":
         hospital_briefing = "PREPARE CRASH CART. ML flagged dangerous vitals."
     elif assessment['risk_level'] == "WARNING":
         hospital_briefing = "Monitor closely. ML detected irregular vitals."
     else:
         hospital_briefing = "Patient stable. Standard admission."
-        
-    return {
-        "success": True,
-        "emergency_id": vitals.emergency_id,
-        "ml_assessment": assessment,
-        "hospital_briefing": hospital_briefing,
-        "vitals_received": em['vitals']
-    }
+    return {"success": True, "emergency_id": vitals.emergency_id,
+            "ml_assessment": assessment, "hospital_briefing": hospital_briefing,
+            "vitals_received": em['vitals']}
 
 @app.post("/emergency/{emergency_id}/accept")
 def accept_emergency(emergency_id: str, accept: HospitalAcceptance):
     if emergency_id not in EMERGENCIES_DB:
         raise HTTPException(status_code=404, detail="Emergency not found")
-        
     em = EMERGENCIES_DB[emergency_id]
     em['status'] = "confirmed"
     em['confirmed'] = True
-    
-    return {
-        "success": True,
-        "emergency_id": emergency_id,
-        "status": "confirmed",
-        "message": "Bed confirmed. ER team is ready.",
-        "eta_minutes": 6,
-        "confirmed_by": accept.confirmed_by
-    }
+    return {"success": True, "emergency_id": emergency_id, "status": "confirmed",
+            "message": "Bed confirmed. ER team is ready.", "eta_minutes": 6,
+            "confirmed_by": accept.confirmed_by}
 
 @app.get("/emergency/{emergency_id}")
 def get_emergency(emergency_id: str):
     if emergency_id not in EMERGENCIES_DB:
         raise HTTPException(status_code=404, detail="Emergency not found")
-        
     return EMERGENCIES_DB[emergency_id]
 
 @app.post("/ambulance/register")
@@ -351,75 +318,39 @@ def register_ambulance(amb: AmbulanceRegister):
     new_amb["id"] = ambulance_id
     new_amb["status"] = "available"
     new_amb["assigned_emergency"] = None
-    
     AMBULANCES_DB.append(new_amb)
-    return {
-        "success": True,
-        "ambulance_id": ambulance_id,
-        "driver_name": new_amb["driver_name"],
-        "vehicle_number": new_amb["vehicle_number"],
-        "message": "Ambulance registered"
-    }
+    return {"success": True, "ambulance_id": ambulance_id,
+            "driver_name": new_amb["driver_name"],
+            "vehicle_number": new_amb["vehicle_number"], "message": "Ambulance registered"}
 
 @app.get("/ambulance/nearest")
 def nearest_ambulance(lat: float, lng: float):
     available = [a for a in AMBULANCES_DB if a["status"] == "available"]
-    
     if not available:
-        return {
-            "nearest_ambulance": None,
-            "all_available": [],
-            "total_available": 0,
-            "message": "No available ambulances found"
-        }
-    
+        return {"nearest_ambulance": None, "all_available": [], "total_available": 0,
+                "message": "No available ambulances found"}
     for amb in available:
         dist = haversine(lat, lng, amb["current_lat"], amb["current_lng"])
         amb["distance_km"] = round(dist, 2)
         amb["eta_minutes"] = round(dist / 0.5, 1)
-        
     available.sort(key=lambda x: x["distance_km"])
-    
-    return {
-        "nearest_ambulance": available[0],
-        "all_available": available,
-        "total_available": len(available)
-    }
+    return {"nearest_ambulance": available[0], "all_available": available,
+            "total_available": len(available)}
 
 @app.get("/ambulance")
 def get_ambulance():
     available_count = sum(1 for a in AMBULANCES_DB if a["status"] == "available")
-    return {
-        "ambulances": AMBULANCES_DB,
-        "total": len(AMBULANCES_DB),
-        "available": available_count
-    }
+    return {"ambulances": AMBULANCES_DB, "total": len(AMBULANCES_DB), "available": available_count}
 
 @app.patch("/ambulance/{ambulance_id}")
 def update_ambulance_status(ambulance_id: str, update: AmbulanceUpdate):
     for amb in AMBULANCES_DB:
         if amb["id"] == ambulance_id:
-            if update.status is not None:
-                amb["status"] = update.status
-            if update.current_lat is not None:
-                amb["current_lat"] = update.current_lat
-            if update.current_lng is not None:
-                amb["current_lng"] = update.current_lng
-            if update.assigned_emergency is not None:
-                amb["assigned_emergency"] = update.assigned_emergency
-                
-            return {
-                "success": True,
-                "updated_ambulance": amb
-            }
-            
+            if update.status is not None: amb["status"] = update.status
+            if update.current_lat is not None: amb["current_lat"] = update.current_lat
+            if update.current_lng is not None: amb["current_lng"] = update.current_lng
+            if update.assigned_emergency is not None: amb["assigned_emergency"] = update.assigned_emergency
+            return {"success": True, "updated_ambulance": amb}
     raise HTTPException(status_code=404, detail="Ambulance not found")
 
 app = socketio.ASGIApp(sio, app)
-
-
-
-
-
-
-
