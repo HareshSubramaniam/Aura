@@ -206,7 +206,7 @@ async def trigger_emergency(req: EmergencyRequest):
             "has_oxygen": best_hosp.get("oxygen", False)
         },
         "familyPhone": req.family_phone
-    }, room="all")
+    })
     return {"emergency_id": emergency_id, "status": "dispatched",
         "hospital_name": best_hosp['name'] if best_hosp else "None",
         "hospital_address": best_hosp.get('address', 'Unknown') if best_hosp else "Unknown",
@@ -415,6 +415,7 @@ def update_ambulance_status(ambulance_id: str, update: AmbulanceUpdate):
     raise HTTPException(status_code=404, detail="Ambulance not found")
 
 app = socketio.ASGIApp(sio, app)
+
 
 
 
