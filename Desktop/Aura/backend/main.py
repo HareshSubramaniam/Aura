@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from uuid import uuid4
 import copy
+import asyncio
 
 from ml_vitals import load_model, predict_vitals_anomaly
 from routing_agent import find_best_hospital, HOSPITALS, score_hospital, haversine
@@ -206,7 +207,7 @@ async def trigger_emergency(req: EmergencyRequest):
             "has_oxygen": best_hosp.get("oxygen", False)
         },
         "familyPhone": req.family_phone
-    })
+    }))
     return {"emergency_id": emergency_id, "status": "dispatched",
         "hospital_name": best_hosp['name'] if best_hosp else "None",
         "hospital_address": best_hosp.get('address', 'Unknown') if best_hosp else "Unknown",
@@ -415,6 +416,8 @@ def update_ambulance_status(ambulance_id: str, update: AmbulanceUpdate):
     raise HTTPException(status_code=404, detail="Ambulance not found")
 
 app = socketio.ASGIApp(sio, app)
+
+
 
 
 
