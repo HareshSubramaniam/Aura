@@ -191,7 +191,7 @@ async def trigger_emergency(req: EmergencyRequest):
         assigned_ambulance = None
     
     # Broadcast emergency to ALL connected clients (driver + hospital tabs)
-    await sio.emit("emergency_assigned", {
+    asyncio.get_event_loop().create_task(sio.emit("emergency_assigned", {
         "emergency_id": emergency_id,
         "patientName": req.patient_name,
         "lat": req.patient_lat,
@@ -415,6 +415,7 @@ def update_ambulance_status(ambulance_id: str, update: AmbulanceUpdate):
     raise HTTPException(status_code=404, detail="Ambulance not found")
 
 app = socketio.ASGIApp(sio, app)
+
 
 
 
