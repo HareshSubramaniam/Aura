@@ -190,8 +190,23 @@ async def trigger_emergency(req: EmergencyRequest):
     else:
         assigned_ambulance = None
     
-    import asyncio
-    asyncio.create_task(sio.emit("emergency_assigned", {"emergency_id": emergency_id, "patientName": req.patient_name, "lat": req.patient_lat, "lng": req.patient_lng, "assignedHospital": {"name": best_hosp["name"] if best_hosp else "Unknown", "score": float(best_hosp["score"]) if best_hosp else 0, "icu": best_hosp["icu"] if best_hosp else 0, "lat": best_hosp["lat"] if best_hosp else 0, "lng": best_hosp["lng"] if best_hosp else 0, "has_doctor": best_hosp.get("doctor", False), "has_oxygen": best_hosp.get("oxygen", False)}, "familyPhone": req.family_phone}))
+    # Broadcast emergency to ALL connected clients (driver + hospital tabs)
+    await sio.emit("emergency_assigned", {
+        "emergency_id": emergency_id,
+        "patientName": req.patient_name,
+        "lat": req.patient_lat,
+        "lng": req.patient_lng,
+        "assignedHospital": {
+            "name": best_hosp["name"] if best_hosp else "Unknown",
+            "score": float(best_hosp["score"]) if best_hosp else 0,
+            "icu": best_hosp["icu"] if best_hosp else 0,
+            "lat": best_hosp["lat"] if best_hosp else 0,
+            "lng": best_hosp["lng"] if best_hosp else 0,
+            "has_doctor": best_hosp.get("doctor", False),
+            "has_oxygen": best_hosp.get("oxygen", False)
+        },
+        "familyPhone": req.family_phone
+    }, room="all")
     return {"emergency_id": emergency_id, "status": "dispatched",
         "hospital_name": best_hosp['name'] if best_hosp else "None",
         "hospital_address": best_hosp.get('address', 'Unknown') if best_hosp else "Unknown",
