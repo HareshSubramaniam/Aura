@@ -135,7 +135,7 @@ def root():
     }
 
 @app.post("/emergency/trigger")
-def trigger_emergency(req: EmergencyRequest):
+async def trigger_emergency(req: EmergencyRequest):
     logger.info("Triggering emergency")
     
     routing_result = find_best_hospital(HOSPITALS_DB, req.patient_lat, req.patient_lng)
@@ -190,9 +190,9 @@ def trigger_emergency(req: EmergencyRequest):
     else:
         assigned_ambulance = None
     
-    return {
-        "emergency_id": emergency_id,
-        "status": "dispatched",
+    import asyncio
+    asyncio.create_task(sio.emit("emergency_assigned", {"emergency_id": emergency_id, "patientName": req.patient_name, "lat": req.patient_lat, "lng": req.patient_lng, "assignedHospital": {"name": best_hosp["name"] if best_hosp else "Unknown", "score": float(best_hosp["score"]) if best_hosp else 0, "icu": best_hosp["icu"] if best_hosp else 0, "lat": best_hosp["lat"] if best_hosp else 0, "lng": best_hosp["lng"] if best_hosp else 0, "has_doctor": best_hosp.get("doctor", False), "has_oxygen": best_hosp.get("oxygen", False)}, "familyPhone": req.family_phone}))
+    return {"emergency_id": emergency_id, "status": "dispatched",
         "hospital_name": best_hosp['name'] if best_hosp else "None",
         "hospital_address": best_hosp.get('address', 'Unknown') if best_hosp else "Unknown",
         "hospital_id": hospital_id_str,
@@ -400,3 +400,5 @@ def update_ambulance_status(ambulance_id: str, update: AmbulanceUpdate):
     raise HTTPException(status_code=404, detail="Ambulance not found")
 
 app = socketio.ASGIApp(sio, app)
+
+
